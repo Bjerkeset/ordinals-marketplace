@@ -1,32 +1,105 @@
 import {
-    method,
-    prop,
-    SmartContract,
-    hash256,
-    assert,
-    SigHash
-} from 'scrypt-ts'
+  Addr,
+  prop,
+  method,
+  Utils,
+  hash256,
+  assert,
+  ContractTransaction,
+  bsv,
+  PubKey,
+  hash160,
+  Sig,
+  SigHash,
+} from "scrypt-ts";
+import {OrdiMethodCallOptions, OrdinalNFT} from "scrypt-ord";
 
-import type {ByteString} from 'scrypt-ts';
+export class OrdinalLock extends OrdinalNFT {
+  @prop()
+  seller: PubKey;
 
-export class OrdinalsMarketplace extends SmartContract {
-    @prop(true)
-    count: bigint
+  @prop()
+  amount: bigint;
 
-    constructor(count: bigint) {
-        super(count)
-        this.count = count
-    }
+  constructor(seller: PubKey, amount: bigint) {
+    super();
+    this.init(...arguments);
+    this.seller = seller;
+    this.amount = amount;
+  }
 
-    @method(SigHash.SINGLE)
-    public increment() {
-        this.count++
+  @method()
+  public purchase(receiver: Addr) {
+    const outputs =
+      Utils.buildAddressOutput(receiver, 1n) + // ordinal to the buyer
+      Utils.buildAddressOutput(hash160(this.seller), this.amount) + // fund to the seller
+      this.buildChangeOutput();
+    assert(
+      this.ctx.hashOutputs == hash256(outputs),
+      "hashOutputs check failed"
+    );
+  }
 
-        // make sure balance in the contract does not change
-        const amount: bigint = this.ctx.utxo.value
-        // output containing the latest state
-        const output: ByteString = this.buildStateOutput(amount)
-        // verify current tx has this single output
-        assert(this.ctx.hashOutputs === hash256(output), 'hashOutputs mismatch')
-    }
+  @method(SigHash.ANYONECANPAY_SINGLE)
+  public cancel(sig: Sig) {
+    assert(this.checkSig(sig, this.seller), "seller signature check failed");
+    const outputs = Utils.buildAddressOutput(hash160(this.seller), 1n); // ordinal back to the seller
+    assert(
+      this.ctx.hashOutputs == hash256(outputs),
+      "hashOutputs check failed"
+    );
+  }
+
+  static async buildTxForPurchase(
+    current: OrdinalLock,
+    options: OrdiMethodCallOptions<OrdinalLock>,
+    receiver: Addr
+  ): Promise<ContractTransaction> {
+    const defaultAddress = await current.signer.getDefaultAddress();
+    const tx = new bsv.Transaction()
+      .addInput(current.buildContractInput())
+      .addOutput(
+        new bsv.Transaction.Output({
+          script: bsv.Script.fromHex(Utils.buildAddressScript(receiver)),
+          satoshis: 1,
+        })
+      )
+      .addOutput(
+        new bsv.Transaction.Output({
+          script: bsv.Script.fromHex(
+            Utils.buildAddressScript(hash160(current.seller))
+          ),
+          satoshis: Number(current.amount),
+        })
+      )
+      .change(options.changeAddress || defaultAddress);
+    return {
+      tx,
+      atInputIndex: 0,
+      nexts: [],
+    };
+  }
+
+  static async buildTxForCancel(
+    current: OrdinalLock,
+    options: OrdiMethodCallOptions<OrdinalLock>
+  ): Promise<ContractTransaction> {
+    const defaultAddress = await current.signer.getDefaultAddress();
+    const tx = new bsv.Transaction()
+      .addInput(current.buildContractInput())
+      .addOutput(
+        new bsv.Transaction.Output({
+          script: bsv.Script.fromHex(
+            Utils.buildAddressScript(hash160(current.seller))
+          ),
+          satoshis: 1,
+        })
+      )
+      .change(options.changeAddress || defaultAddress);
+    return {
+      tx,
+      atInputIndex: 0,
+      nexts: [],
+    };
+  }
 }
